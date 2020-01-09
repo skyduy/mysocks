@@ -1,12 +1,13 @@
-package lightsocks
+package core
 
 import (
 	"encoding/binary"
+	"github.com/skyduy/mysocks/cipher"
 	"net"
 )
 
-type LsServer struct {
-	Cipher     *cipher
+type MyServer struct {
+	Cipher     *cipher.Cipher
 	ListenAddr *net.TCPAddr
 }
 
@@ -15,8 +16,8 @@ type LsServer struct {
 // 1. 监听来自本地代理客户端的请求
 // 2. 解密本地代理客户端请求的数据，解析 SOCKS5 协议，连接用户浏览器真正想要连接的远程服务器
 // 3. 转发用户浏览器真正想要连接的远程服务器返回的数据的加密后的内容到本地代理客户端
-func NewLsServer(password string, listenAddr string) (*LsServer, error) {
-	bsPassword, err := parsePassword(password)
+func NewServer(password string, listenAddr string) (*MyServer, error) {
+	bsPassword, err := cipher.ParsePassword(password)
 	if err != nil {
 		return nil, err
 	}
@@ -24,24 +25,24 @@ func NewLsServer(password string, listenAddr string) (*LsServer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &LsServer{
-		Cipher:     newCipher(bsPassword),
+	return &MyServer{
+		Cipher:     cipher.NewCipher(bsPassword),
 		ListenAddr: structListenAddr,
 	}, nil
-
 }
 
 // 运行服务端并且监听来自本地代理客户端的请求
-func (lsServer *LsServer) Listen(didListen func(listenAddr net.Addr)) error {
-	return ListenSecureTCP(lsServer.ListenAddr, lsServer.Cipher, lsServer.handleConn, didListen)
+func (server *MyServer) Run() error {
+	return ListenSecureTCP(server.ListenAddr, server.Cipher, server.handleConn)
 }
 
 // 解 SOCKS5 协议
 // https://www.ietf.org/rfc/rfc1928.txt
-func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
+func (server *MyServer) handleConn(localConn *SecureTCPConn) {
 	defer localConn.Close()
 	buf := make([]byte, 256)
 
+	// ---------------------------- 第一回合：ss-local和ss-server 建立连接 ----------------------------
 	/**
 	   The localConn connects to the dstServer, and sends a ver
 	   identifier/method selection message:
@@ -54,7 +55,7 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 	   NMETHODS field contains the number of method identifier octets that
 	   appear in the METHODS field.
 	*/
-	// 第一个字段VER代表Socks的版本，Socks5默认为0x05，其固定长度为1个字节
+	// ss-local->ss-server 第一个字段VER代表Socks的版本，Socks5默认为0x05，其固定长度为1个字节
 	_, err := localConn.DecodeRead(buf)
 	// 只支持版本5
 	if err != nil || buf[0] != 0x05 {
@@ -71,9 +72,10 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 		          | 1  |   1    |
 		          +----+--------+
 	*/
-	// 不需要验证，直接验证通过
-	localConn.EncodeWrite([]byte{0x05, 0x00})
+	// ss-server->ss-local 不需要验证，直接验证通过
+	_, _ = localConn.EncodeWrite([]byte{0x05, 0x00})
 
+	// ---------------------------- 第二回合：确认最终dest，如 google.com ----------------------------
 	/**
 	  +----+-----+-------+------+----------+----------+
 	  |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
@@ -82,7 +84,7 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 	  +----+-----+-------+------+----------+----------+
 	*/
 
-	// 获取真正的远程服务的地址
+	// ss-local->ss-server 获取真正的远程服务的地址
 	n, err := localConn.DecodeRead(buf)
 	// n 最短的长度为7 情况为 ATYP=3 DST.ADDR占用1字节 值为0x0
 	if err != nil || n < 7 {
@@ -121,14 +123,14 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 		Port: int(binary.BigEndian.Uint16(dPort)),
 	}
 
-	// 连接真正的远程服务
+	// 连接真正的远程服务，此处最靠近底层，位于传输层之上。
 	dstServer, err := net.DialTCP("tcp", nil, dstAddr)
 	if err != nil {
 		return
 	} else {
 		defer dstServer.Close()
 		// Conn被关闭时直接清除所有数据 不管没有发送的数据
-		dstServer.SetLinger(0)
+		_ = dstServer.SetLinger(0)
 
 		// 响应客户端连接成功
 		/**
@@ -138,11 +140,11 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 		  | 1  |  1  | X'00' |  1   | Variable |    2     |
 		  +----+-----+-------+------+----------+----------+
 		*/
-		// 响应客户端连接成功
-		localConn.EncodeWrite([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+		// ss-server->ss-local 响应客户端连接成功， 因为无认证，这里直接返回
+		_, _ = localConn.EncodeWrite([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
 	}
 
-	// 进行转发
+	// ---------------------------- 第三回合，以及后续回合：转发 ----------------------------
 	// 从 localUser 读取数据发送到 dstServer
 	go func() {
 		err := localConn.DecodeCopy(dstServer)
@@ -153,8 +155,8 @@ func (lsServer *LsServer) handleConn(localConn *SecureTCPConn) {
 		}
 	}()
 	// 从 dstServer 读取数据发送到 localUser，这里因为处在翻墙阶段出现网络错误的概率更大
-	(&SecureTCPConn{
-		Cipher:          localConn.Cipher,
+	_ = (&SecureTCPConn{
 		ReadWriteCloser: dstServer,
+		Cipher:          localConn.Cipher,
 	}).EncodeCopy(localConn)
 }

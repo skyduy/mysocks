@@ -1,7 +1,8 @@
-package cmd
+package main
 
 import (
-	"github.com/gwuhaolin/lightsocks"
+	"github.com/skyduy/mysocks/cipher"
+	"github.com/skyduy/mysocks/core"
 	"golang.org/x/net/proxy"
 	"io"
 	"log"
@@ -14,33 +15,31 @@ import (
 )
 
 const (
-	MaxPackSize               = 1024 * 1024 * 5 // 5Mb
-	EchoServerAddr            = "127.0.0.1:3453"
-	LightSocksProxyLocalAddr  = "127.0.0.1:8448"
-	LightSocksProxyServerAddr = "127.0.0.1:8449"
+	MaxPackSize = 1024 * 1024 * 5 // 5Mb
+	GoogleAddr  = "127.0.0.1:3453"
+	LocalAddr   = "127.0.0.1:8448"
+	ServerAddr  = "127.0.0.1:8449"
 )
 
 var (
-	lightsocksDialer proxy.Dialer
+	chromeDialer proxy.Dialer
 )
 
 func init() {
 	log.SetFlags(log.Lshortfile)
-	go runEchoServer()
-	go runLightsocksProxyServer()
-	// 初始化代理socksDialer
+	go fakeGoogle()
+	go runTunnel()
 	var err error
-	// 等它们启动好
 	time.Sleep(time.Second)
-	lightsocksDialer, err = proxy.SOCKS5("tcp", LightSocksProxyLocalAddr, nil, proxy.Direct)
+	chromeDialer, err = proxy.SOCKS5("tcp", LocalAddr, nil, proxy.Direct)
 	if err != nil {
 		log.Fatalln(err)
 	}
 }
 
 // 启动echo server
-func runEchoServer() {
-	listener, err := net.Listen("tcp", EchoServerAddr)
+func fakeGoogle() {
+	listener, err := net.Listen("tcp", GoogleAddr)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -49,37 +48,32 @@ func runEchoServer() {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Fatalln(err)
-			continue
 		}
 		log.Println("echoServer connect Accept")
 		go func() {
 			defer func() {
-				conn.Close()
+				_ = conn.Close()
 				log.Println("echoServer connect Close")
 			}()
-			io.Copy(conn, conn)
+			_, _ = io.Copy(conn, conn)
 		}()
 	}
 }
 
-func runLightsocksProxyServer() {
-	password := lightsocks.RandPassword()
-	serverS, err := lightsocks.NewLsLocal(password, LightSocksProxyLocalAddr, LightSocksProxyServerAddr)
+func runTunnel() {
+	password := cipher.RandPassword()
+	serverS, err := core.NewLocal(password, LocalAddr, ServerAddr)
 	if err != nil {
 		log.Fatalln(err)
 	}
-	localS, err := lightsocks.NewLsServer(password, LightSocksProxyServerAddr)
+	localS, err := core.NewServer(password, ServerAddr)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	go func() {
-		log.Fatalln(serverS.Listen(func(listenAddr net.Addr) {
-			log.Println(listenAddr)
-		}))
+		log.Fatalln(serverS.Run())
 	}()
-	log.Fatalln(localS.Listen(func(listenAddr net.Addr) {
-		log.Println(listenAddr)
-	}))
+	log.Fatalln(localS.Run())
 }
 
 // 发生一次连接测试经过代理后的数据传输的正确性
@@ -90,7 +84,7 @@ func testConnect(packSize int) {
 	_, err := rand.Read(data)
 
 	// 连接
-	conn, err := lightsocksDialer.Dial("tcp", EchoServerAddr)
+	conn, err := chromeDialer.Dial("tcp", GoogleAddr)
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -98,7 +92,7 @@ func testConnect(packSize int) {
 
 	// 写
 	go func() {
-		conn.Write(data)
+		_, _ = conn.Write(data)
 	}()
 
 	// 读
@@ -108,18 +102,18 @@ func testConnect(packSize int) {
 		log.Fatalln(err)
 	}
 	if !reflect.DeepEqual(data, buf) {
-		log.Fatalln("通过 Lightsocks 代理传输得到的数据前后不一致")
+		log.Fatalln("代理传输得到的数据前后不一致")
 	} else {
-		log.Println("数据一致性验证通过")
+		log.Println("数据传输一致")
 	}
 }
 
-func TestLightsocks(t *testing.T) {
+func TestProxy(t *testing.T) {
 	testConnect(rand.Intn(MaxPackSize))
 }
 
 // 获取并发发送 data 到 echo server 并且收到全部返回 所花费到时间
-func benchmarkLightsocks(concurrenceCount int) {
+func benchmarkProxy(concurrenceCount int) {
 	wg := sync.WaitGroup{}
 	wg.Add(concurrenceCount)
 	for i := 0; i < concurrenceCount; i++ {
@@ -132,10 +126,10 @@ func benchmarkLightsocks(concurrenceCount int) {
 }
 
 // 获取 发送 data 到 echo server 并且收到全部返回 所花费到时间
-func BenchmarkLightsocks(b *testing.B) {
+func BenchmarkProxy(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		b.StartTimer()
-		benchmarkLightsocks(10)
+		benchmarkProxy(10)
 		b.StopTimer()
 	}
 }

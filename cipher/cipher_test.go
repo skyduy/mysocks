@@ -1,4 +1,4 @@
-package lightsocks
+package cipher
 
 import (
 	"crypto/rand"
@@ -14,8 +14,8 @@ const (
 func TestCipher(t *testing.T) {
 	password := RandPassword()
 	t.Log(password)
-	p, _ := parsePassword(password)
-	cipher := newCipher(p)
+	p, _ := ParsePassword(password)
+	cipher := NewCipher(p)
 	// 原数据
 	org := make([]byte, passwordLength)
 	for i := 0; i < passwordLength; i++ {
@@ -26,10 +26,10 @@ func TestCipher(t *testing.T) {
 	copy(tmp, org)
 	t.Log(tmp)
 	// 加密 tmp
-	cipher.encode(tmp)
+	cipher.Encode(tmp)
 	t.Log(tmp)
 	// 解密 tmp
-	cipher.decode(tmp)
+	cipher.Decode(tmp)
 	t.Log(tmp)
 	if !reflect.DeepEqual(org, tmp) {
 		t.Error("解码编码数据后无法还原数据，数据不对应")
@@ -38,20 +38,20 @@ func TestCipher(t *testing.T) {
 
 func BenchmarkEncode(b *testing.B) {
 	password := RandPassword()
-	p, _ := parsePassword(password)
-	cipher := newCipher(p)
+	p, _ := ParsePassword(password)
+	cipher := NewCipher(p)
 	bs := make([]byte, MB)
 	b.ResetTimer()
 	rand.Read(bs)
-	cipher.encode(bs)
+	cipher.Encode(bs)
 }
 
 func BenchmarkDecode(b *testing.B) {
 	password := RandPassword()
-	p, _ := parsePassword(password)
-	cipher := newCipher(p)
+	p, _ := ParsePassword(password)
+	cipher := NewCipher(p)
 	bs := make([]byte, MB)
 	b.ResetTimer()
 	rand.Read(bs)
-	cipher.decode(bs)
+	cipher.Decode(bs)
 }

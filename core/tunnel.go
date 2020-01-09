@@ -1,6 +1,7 @@
-package lightsocks
+package core
 
 import (
+	"github.com/skyduy/mysocks/cipher"
 	"io"
 	"log"
 	"net"
@@ -13,7 +14,7 @@ const (
 // 加密传输的 TCP Socket
 type SecureTCPConn struct {
 	io.ReadWriteCloser
-	Cipher *cipher
+	Cipher *cipher.Cipher
 }
 
 // 从输入流里读取加密过的数据，解密后把原数据放到bs里
@@ -22,18 +23,22 @@ func (secureSocket *SecureTCPConn) DecodeRead(bs []byte) (n int, err error) {
 	if err != nil {
 		return
 	}
-	secureSocket.Cipher.decode(bs[:n])
+	secureSocket.Cipher.Decode(bs[:n])
 	return
 }
 
 // 把放在bs里的数据加密后立即全部写入输出流
 func (secureSocket *SecureTCPConn) EncodeWrite(bs []byte) (int, error) {
-	secureSocket.Cipher.encode(bs)
+	secureSocket.Cipher.Encode(bs)
 	return secureSocket.Write(bs)
 }
 
-// 从src中源源不断的读取原数据加密后写入到dst，直到src中没有数据可以再读取
+// EncodeCopy 将数据加密后，放入隧道
 func (secureSocket *SecureTCPConn) EncodeCopy(dst io.ReadWriteCloser) error {
+	secureDst := SecureTCPConn{
+		ReadWriteCloser: dst,
+		Cipher:          secureSocket.Cipher,
+	}
 	buf := make([]byte, bufSize)
 	for {
 		readCount, errRead := secureSocket.Read(buf)
@@ -45,10 +50,8 @@ func (secureSocket *SecureTCPConn) EncodeCopy(dst io.ReadWriteCloser) error {
 			}
 		}
 		if readCount > 0 {
-			writeCount, errWrite := (&SecureTCPConn{
-				ReadWriteCloser: dst,
-				Cipher:          secureSocket.Cipher,
-			}).EncodeWrite(buf[0:readCount])
+			// TODO EncodeWrite这里可以设置多条TCP连接，同时加密并写入
+			writeCount, errWrite := secureDst.EncodeWrite(buf[0:readCount])
 			if errWrite != nil {
 				return errWrite
 			}
@@ -59,10 +62,11 @@ func (secureSocket *SecureTCPConn) EncodeCopy(dst io.ReadWriteCloser) error {
 	}
 }
 
-// 从src中源源不断的读取加密后的数据解密后写入到dst，直到src中没有数据可以再读取
+// DecodeCopy 当数据从隧道取出，并解密
 func (secureSocket *SecureTCPConn) DecodeCopy(dst io.Writer) error {
 	buf := make([]byte, bufSize)
 	for {
+		// TODO Decode这里可设置多条TCP连接，同时读取并解密
 		readCount, errRead := secureSocket.DecodeRead(buf)
 		if errRead != nil {
 			if errRead != io.EOF {
@@ -84,7 +88,7 @@ func (secureSocket *SecureTCPConn) DecodeCopy(dst io.Writer) error {
 }
 
 // see net.DialTCP
-func DialTCPSecure(raddr *net.TCPAddr, cipher *cipher) (*SecureTCPConn, error) {
+func DialTCPSecure(raddr *net.TCPAddr, cipher *cipher.Cipher) (*SecureTCPConn, error) {
 	remoteConn, err := net.DialTCP("tcp", nil, raddr)
 	if err != nil {
 		return nil, err
@@ -96,17 +100,12 @@ func DialTCPSecure(raddr *net.TCPAddr, cipher *cipher) (*SecureTCPConn, error) {
 }
 
 // see net.ListenTCP
-func ListenSecureTCP(laddr *net.TCPAddr, cipher *cipher, handleConn func(localConn *SecureTCPConn), didListen func(listenAddr net.Addr)) error {
+func ListenSecureTCP(laddr *net.TCPAddr, cipher *cipher.Cipher, handleConn func(localConn *SecureTCPConn)) error {
 	listener, err := net.ListenTCP("tcp", laddr)
 	if err != nil {
 		return err
 	}
-
 	defer listener.Close()
-
-	if didListen != nil {
-		didListen(listener.Addr())
-	}
 
 	for {
 		localConn, err := listener.AcceptTCP()
@@ -115,7 +114,7 @@ func ListenSecureTCP(laddr *net.TCPAddr, cipher *cipher, handleConn func(localCo
 			continue
 		}
 		// localConn被关闭时直接清除所有数据 不管没有发送的数据
-		localConn.SetLinger(0)
+		_ = localConn.SetLinger(0)
 		go handleConn(&SecureTCPConn{
 			ReadWriteCloser: localConn,
 			Cipher:          cipher,

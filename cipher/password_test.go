@@ -1,4 +1,4 @@
-package lightsocks
+package cipher
 
 import (
 	"sort"
@@ -20,7 +20,7 @@ func (password *password) Swap(i, j int) {
 func TestRandPassword(t *testing.T) {
 	password := RandPassword()
 	t.Log(password)
-	bsPassword, err := parsePassword(password)
+	bsPassword, err := ParsePassword(password)
 	if err != nil {
 		t.Error(err)
 	}
